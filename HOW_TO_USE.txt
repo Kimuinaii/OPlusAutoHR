@@ -1,0 +1,21 @@
+OPlusAutoHR 中英双语 README 更新包
+
+你只需要：
+
+1. 把本 ZIP 里的全部内容解压到：
+   D:\OPlusAutoHR
+
+2. 如果询问是否覆盖 README.md / docs 文件，选择“全部替换”。
+
+3. 在 D:\OPlusAutoHR 打开 PowerShell，执行：
+
+   powershell -ExecutionPolicy Bypass -File .\publish_update.ps1
+
+脚本会自动：
+- 把 README.md 设为中文默认首页
+- 新增 README_EN.md 英文版
+- 在两份 README 顶部加入“简体中文 / English”切换链接
+- 放入 WebUI 截图
+- 自动 git add / commit / push
+
+完成后刷新 GitHub 页面即可。
