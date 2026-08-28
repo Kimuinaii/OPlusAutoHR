@@ -1,0 +1,899 @@
+#!/system/bin/sh
+MODDIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
+RUNDIR=/data/local/tmp/oplusautohr_v2
+LOG="$RUNDIR/engine.log"
+SETTINGS="$MODDIR/config/settings.conf"
+PREVIEWDIR="$RUNDIR/previews"
+
+mkdir -p "$RUNDIR" "$MODDIR/config" "$PREVIEWDIR"
+touch "$LOG" "$SETTINGS"
+chmod 0666 "$LOG" 2>/dev/null
+chmod 0644 "$SETTINGS" 2>/dev/null
+
+jesc() {
+  printf '%s' "$1" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/"/\\"/g' \
+    -e ':a;N;$!ba;s/\r/\\r/g;s/\n/\\n/g;s/\t/\\t/g'
+}
+
+setting() {
+  sed -n "s/^$1=//p" "$SETTINGS" 2>/dev/null | tail -n1
+}
+
+set_setting() {
+  key="$1"; value="$2"; tmp="$SETTINGS.tmp.$$"
+  awk -F= -v k="$key" '$1 != k {print}' "$SETTINGS" 2>/dev/null > "$tmp"
+  printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  mv -f "$tmp" "$SETTINGS"
+  chmod 0644 "$SETTINGS" 2>/dev/null
+}
+
+is_xiaomi_device() {
+  m="$(getprop ro.product.manufacturer 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  b="$(getprop ro.product.brand 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  case "$m $b" in
+    *xiaomi*|*redmi*|*poco*) return 0 ;;
+  esac
+  [ -n "$(getprop ro.miui.ui.version.name 2>/dev/null)" ] && return 0
+  [ -n "$(getprop ro.mi.os.version.name 2>/dev/null)" ] && return 0
+  return 1
+}
+
+internal_max_enabled() {
+  v="$(setting internal_max_enabled)"
+  if [ "$v" = "1" ]; then return 0; fi
+  if [ "$v" = "0" ]; then return 1; fi
+  is_xiaomi_device
+}
+
+sf_ids() { dumpsys SurfaceFlinger --display-id 2>/dev/null; }
+
+find_external_line() {
+  sf_ids | awk '/Display [0-9]+ \(HWC display [0-9]+\)/ && $0 !~ /\(HWC display 0\)/ {print;exit}'
+}
+find_internal_line() {
+  sf_ids | awk '/Display [0-9]+ \(HWC display 0\)/ {print;exit}'
+}
+parse_phys() { printf '%s\n' "$1"|sed -n 's/^Display \([0-9][0-9]*\).*/\1/p'; }
+parse_hwc()  { printf '%s\n' "$1"|sed -n 's/.*(HWC display \([0-9][0-9]*\)).*/\1/p'; }
+parse_name() { printf '%s\n' "$1"|sed -n 's/.*displayName="\([^"]*\)".*/\1/p'; }
+parse_pnp()  { printf '%s\n' "$1"|sed -n 's/.*pnpId=\([^ ]*\).*/\1/p'; }
+parse_port() { printf '%s\n' "$1"|sed -n 's/.*port=\([^ ]*\).*/\1/p'; }
+
+find_logical_id() {
+  phys="$1"
+  cmd display get-displays 2>/dev/null | awk -v p="$phys" '
+    /Display id [0-9]+:/ {x=$0;sub(/^.*Display id /,"",x);sub(/:.*/,"",x);id=x}
+    index($0,"local:" p){print id;exit}'
+}
+
+sf_display_block() {
+  phys="$1"
+  dumpsys SurfaceFlinger 2>/dev/null | awk -v p="$phys" '
+    $0=="Follower Display " p || $0=="Pacesetter Display " p {hit=1}
+    hit{print}
+    hit && /displayManagerPolicy=/{exit}'
+}
+sf_external_block() { sf_display_block "$1"; }
+active_line() { sf_display_block "$1"|awk '/activeMode=\{/{print;exit}'; }
+pacesetter_phys() {
+  dumpsys SurfaceFlinger 2>/dev/null | awk '/^Pacesetter Display [0-9]+/{print $3;exit}'
+}
+pacesetter_block() {
+  dumpsys SurfaceFlinger 2>/dev/null | awk '
+    /^Pacesetter Display [0-9]+/{hit=1}
+    hit{print}
+    hit && /displayManagerPolicy=/{exit}'
+}
+pace_active_line() { pacesetter_block | awk '/activeMode=\{/{print;exit}'; }
+pace_render_line() { pacesetter_block | awk '/renderRate=/{print;exit}'; }
+render_line() { sf_external_block "$1"|awk '/renderRate=/{print;exit}'; }
+parse_resolution() { printf '%s\n' "$1"|sed -nE 's/.*resolution=([0-9]+x[0-9]+).*/\1/p'|head -n1; }
+parse_hz() { printf '%s\n' "$1"|sed -nE 's/.*vsyncRate=([0-9]+([.][0-9]+)?) Hz.*/\1/p'|head -n1; }
+parse_render() { printf '%s\n' "$1"|sed -nE 's/.*renderRate=([0-9]+([.][0-9]+)?) Hz.*/\1/p'|head -n1; }
+parse_mode_id() { printf '%s\n' "$1"|sed -nE 's/.*activeMode=\{id=([0-9]+).*/\1/p'|head -n1; }
+
+period_for_hz() {
+  awk -v h="$1" 'BEGIN{if(h<=0)print 0;else printf "%.0f\n",1000000000/h}'
+}
+
+mode_line_by_target() {
+  phys="$1";w="$2";h="$3";target="$4"
+  sf_external_block "$phys"|awk -v w="$w" -v h="$h" -v hz="$target" '
+    /displayModes=/{m=1;next}
+    m && /displayManagerPolicy=/{exit}
+    m && /resolution=/{
+      line=$0
+      res=line;sub(/^.*resolution=/,"",res);sub(/,.*/,"",res)
+      rr=line;sub(/^.*vsyncRate=/,"",rr);sub(/ Hz.*/,"",rr)
+      split(res,wh,"x");d=rr-hz;if(d<0)d=-d
+      if(wh[1]==w&&wh[2]==h&&d<0.2){print;exit}
+    }'
+}
+mode_field() {
+  case "$2" in
+    id) printf '%s\n' "$1"|sed -nE 's/.*\{id=([0-9]+),.*/\1/p' ;;
+    hwc) printf '%s\n' "$1"|sed -nE 's/.*hwcId=([0-9]+),.*/\1/p' ;;
+    hz) printf '%s\n' "$1"|sed -nE 's/.*vsyncRate=([0-9]+([.][0-9]+)?) Hz.*/\1/p' ;;
+  esac
+}
+
+best_refresh_for_resolution() {
+  phys="$1"; w="$2"; h="$3"
+  sf_external_block "$phys" | awk -v w="$w" -v h="$h" '
+    /displayModes=/{m=1;next}
+    m&&/displayManagerPolicy=/{exit}
+    m&&/resolution=/ {
+      line=$0
+      res=line;sub(/^.*resolution=/,"",res);sub(/,.*/,"",res)
+      rr=line;sub(/^.*vsyncRate=/,"",rr);sub(/ Hz.*/,"",rr)
+      split(res,wh,"x")
+      if(wh[1]==w && wh[2]==h && rr+0>0) print rr+0
+    }' | sort -nr | head -n1
+}
+
+
+best_internal_native_mode() {
+  int="$(find_internal_line)"
+  [ -n "$int" ] || return 1
+  phys="$(parse_phys "$int")"
+  [ -n "$phys" ] || return 1
+
+  # Pick one real mode, not an independently combined resolution/Hz pair:
+  # highest pixel-area resolution first, then highest refresh inside that group.
+  sf_display_block "$phys" | awk '
+    /displayModes=/{m=1;next}
+    m&&/displayManagerPolicy=/{exit}
+    m&&/resolution=/&&/vsyncRate=/ {
+      line=$0
+      id=line; sub(/^.*\{id=/,"",id); sub(/,.*/,"",id)
+      res=line; sub(/^.*resolution=/,"",res); sub(/,.*/,"",res)
+      rr=line; sub(/^.*vsyncRate=/,"",rr); sub(/ Hz.*/,"",rr)
+      grp=line; sub(/^.*group=/,"",grp); sub(/,.*/,"",grp)
+      split(res,wh,"x")
+      area=(wh[1]+0)*(wh[2]+0)
+      hz=rr+0
+      if(id!="" && wh[1]>0 && wh[2]>0 && hz>0 &&
+         (area>bestArea || (area==bestArea && hz>bestHz))){
+        bestArea=area; bestHz=hz; bestId=id; bestW=wh[1]; bestH=wh[2]; bestGroup=grp
+      }
+    }
+    END{
+      if(bestId!="") printf "%s|%s|%s|%.6f|%s\n",bestId,bestW,bestH,bestHz,bestGroup
+    }'
+}
+
+apply_internal_max_lock() {
+  reason="${1:-manual}"
+  if ! internal_max_enabled; then
+    echo '{"ok":true,"enabled":false,"applied":false,"skipped":"disabled"}'
+    return 0
+  fi
+
+  ext="$(find_external_line)"
+  [ -n "$ext" ] || {
+    echo '{"ok":true,"enabled":true,"applied":false,"skipped":"no_external_display"}'
+    return 0
+  }
+
+  int="$(find_internal_line)"
+  [ -n "$int" ] || {
+    setprop debug.oah.internalmax_result 0
+    echo '{"ok":false,"enabled":true,"applied":false,"message":"Internal display not found"}'
+    return 4
+  }
+  phys="$(parse_phys "$int")"
+  best="$(best_internal_native_mode)"
+  [ -n "$best" ] || {
+    setprop debug.oah.internalmax_result 0
+    echo '{"ok":false,"enabled":true,"applied":false,"message":"No internal display modes found"}'
+    return 5
+  }
+
+  oldIFS="$IFS"; IFS='|'; set -- $best; IFS="$oldIFS"
+  mode="$1"; w="$2"; h="$3"; hz="$4"; group="$5"
+  [ -n "$mode" ] && [ -n "$phys" ] || return 6
+
+  out="$(service call SurfaceFlinger 1035 i32 "$mode" i64 "$phys" 2>&1)"
+
+  ok=0; i=0
+  while [ "$i" -lt 16 ]; do
+    cur="$(parse_mode_id "$(active_line "$phys")")"
+    if [ "$cur" = "$mode" ]; then ok=1; break; fi
+    sleep 0.08
+    i=$((i+1))
+  done
+
+  setprop debug.oah.internalmax_phys "$phys"
+  setprop debug.oah.internalmax_mode "$mode"
+  setprop debug.oah.internalmax_refresh "$hz"
+  setprop debug.oah.internalmax_resolution "${w}x${h}"
+  setprop debug.oah.internalmax_result "$ok"
+  echo "$(date '+%F %T') [OAH-INTERNAL-MAX] reason=$reason phys=$phys mode=$mode ${w}x${h}@${hz}Hz group=${group:-0} ok=$ok result=$out" >> "$LOG"
+
+  printf '{"ok":%s,"enabled":true,"applied":%s,"reason":"%s","physicalId":"%s","modeId":%s,"resolution":"%sx%s","refresh":%s,"group":"%s","serviceResult":"%s"}\n'     "$([ "$ok" = 1 ] && echo true || echo false)" "$([ "$ok" = 1 ] && echo true || echo false)"     "$(jesc "$reason")" "$(jesc "$phys")" "$mode" "$w" "$h" "$hz" "$(jesc "${group:-0}")" "$(jesc "$out")"
+  [ "$ok" = 1 ]
+}
+
+set_internal_max_lock() {
+  en="$1"; [ "$en" = "1" ] || en=0
+  set_setting internal_max_enabled "$en"
+  if [ "$en" = "1" ]; then
+    apply_internal_max_lock manual
+  else
+    # Deliberately do not restore the current DebugEnhance policy. On HyperOS the
+    # 1035 lock survives unplug and is naturally cleared by reboot/SF lifecycle.
+    echo '{"ok":true,"enabled":false,"applied":false,"restore":"deferred_until_reboot"}'
+  fi
+}
+
+engine_pid() {
+  ps -A -o PID,ARGS 2>/dev/null | awk '/[f]ij1673/ && /oah_v2_agent\.js/ {print $1;exit}'
+}
+engine_alive() {
+  [ -n "$(engine_pid)" ]
+}
+injector_path() {
+  for p in \
+    /data/local/tmp/oplusautohr_beta/fij1673 \
+    "$MODDIR/bin/fij1673" \
+    /data/local/tmp/hksurfaceflinger/fij1673 \
+    /data/adb/modules/hooksurfaceflinger_auto/zhiyuan/hksurfaceflinger/fij1673 \
+    /data/adb/modules/hooksurfaceflinger/zhiyuan/hksurfaceflinger/fij1673
+  do
+    [ -x "$p" ] && { printf '%s\n' "$p"; return 0; }
+  done
+  return 1
+}
+ensure_engine() {
+  engine_alive && return 0
+  if ! ps -A -o PID,ARGS 2>/dev/null | grep '[e]ngine_supervisor.sh' >/dev/null; then
+    sh "$MODDIR/bin/engine_supervisor.sh" >/dev/null 2>&1 &
+  fi
+  i=0
+  while [ "$i" -lt 10 ]; do
+    engine_alive && return 0
+    sleep 0.15
+    i=$((i+1))
+  done
+  return 1
+}
+
+latest_state_line() {
+  # State is emitted at least every ~450 ms. Only inspect the tail instead of
+  # repeatedly grepping the whole rotating injector log.
+  tail -n 96 "$LOG" 2>/dev/null | awk '/^\[OAH-STATE\]/{line=$0} END{print line}'
+}
+st() {
+  key="$1"
+  line="${STATE_LINE:-$(latest_state_line)}"
+  case " $line " in
+    *" $key="*) rest="${line#* $key=}"; printf '%s\n' "${rest%% *}" ;;
+    *) printf '\n' ;;
+  esac
+}
+
+publish_identity() {
+  ext="$1"
+  phys="$(parse_phys "$ext")"; hwc="$(parse_hwc "$ext")"
+  setprop debug.oah.phys "$phys"
+  setprop debug.oah.hwc "$hwc"
+}
+
+send_apply_props() {
+  seq="$1";phys="$2";hwc="$3";sfid="$4";cfg="$5";w="$6";h="$7";rr="$8";period="$9"
+  setprop debug.oah.action apply
+  setprop debug.oah.phys "$phys"
+  setprop debug.oah.hwc "$hwc"
+  setprop debug.oah.sfmode "$sfid"
+  setprop debug.oah.config "$cfg"
+  setprop debug.oah.width "$w"
+  setprop debug.oah.height "$h"
+  setprop debug.oah.refresh "$rr"
+  setprop debug.oah.period "$period"
+  # Commit last.
+  setprop debug.oah.seq "$seq"
+}
+
+link_guess() {
+  phys="$1"
+  sf_external_block "$phys" | awk '
+    /displayModes=/{m=1;next}
+    m&&/displayManagerPolicy=/{exit}
+    m&&/resolution=/{
+      line=$0
+      res=line;sub(/^.*resolution=/,"",res);sub(/,.*/,"",res)
+      rr=line;sub(/^.*vsyncRate=/,"",rr);sub(/ Hz.*/,"",rr)
+      split(res,wh,"x")
+      if(wh[1]>=3840&&wh[2]>=2160&&rr>=100){print "DP 1.4+ / DSC class (estimated)";found=1;exit}
+      if(wh[1]>=2560&&wh[2]>=1440&&rr>=165)hi=1
+      if(wh[1]>=3840&&wh[2]>=2160&&rr>=60)mid=1
+    }
+    END{
+      if(found)exit
+      if(hi)print "DP 1.4+ (estimated)"
+      else if(mid)print "DP 1.4 class (estimated)"
+      else print "DP 1.2+ (estimated)"
+    }'
+}
+
+
+link_guess_from_block() {
+  printf '%s\n' "$1" | awk '
+    /displayModes=/{m=1;next}
+    m&&/displayManagerPolicy=/{exit}
+    m&&/resolution=/ {
+      line=$0
+      res=line;sub(/^.*resolution=/,"",res);sub(/,.*/,"",res)
+      rr=line;sub(/^.*vsyncRate=/,"",rr);sub(/ Hz.*/,"",rr)
+      split(res,wh,"x")
+      if(wh[1]>=3840&&wh[2]>=2160&&rr>=100){print "DP 1.4+ / DSC class (estimated)";found=1;exit}
+      if(wh[1]>=2560&&wh[2]>=1440&&rr>=165)hi=1
+      if(wh[1]>=3840&&wh[2]>=2160&&rr>=60)mid=1
+    }
+    END{if(!found){if(hi)print "DP 1.4+ (estimated)";else if(mid)print "DP 1.4 class (estimated)";else print "DP 1.2+ (estimated)"}}'
+}
+
+sf_compact_snapshot() {
+  phys="$1"
+  # IMPORTANT: stream dumpsys through awk. Never store the full SurfaceFlinger
+  # dump in a shell variable: it can be huge and was the cause of the Alpha3.5
+  # SF/Pacesetter/DP regression.
+  dumpsys SurfaceFlinger 2>/dev/null | awk -v p="$phys" '
+    function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s}
+    function getres(s, r){r=s;sub(/^.*resolution=/,"",r);sub(/,.*/,"",r);return r}
+    function gethz(s, r){r=s;sub(/^.*vsyncRate=/,"",r);sub(/ Hz.*/,"",r);return r}
+    function getrender(s, r){r=s;sub(/^.*renderRate=/,"",r);sub(/ Hz.*/,"",r);return r}
+    function getid(s, r){r=s;sub(/^.*activeMode=\{id=/,"",r);sub(/,.*/,"",r);return r}
+
+    {
+      t=trim($0)
+
+      if(t ~ /^Pacesetter Display [0-9]+$/){
+        split(t,a," ")
+        pacePhys=a[3]
+        inPace=1
+      }
+
+      if(t=="Follower Display " p || t=="Pacesetter Display " p){
+        inExt=1
+        extModes=0
+      }
+
+      if(inExt){
+        if(!extRenderDone && t ~ /renderRate=/){
+          print "EXT_RENDER=" getrender(t)
+          extRenderDone=1
+        }
+        if(!extActiveDone && t ~ /activeMode=\{/){
+          print "EXT_RES=" getres(t)
+          print "EXT_HZ=" gethz(t)
+          print "EXT_MODE=" getid(t)
+          extActiveDone=1
+        }
+
+        if(t ~ /displayModes=/){
+          extModes=1
+          next
+        }
+        if(extModes && t ~ /resolution=/ && t ~ /vsyncRate=/){
+          res=getres(t); rr=gethz(t)+0
+          split(res,wh,"x")
+          if(wh[1]>=3840 && wh[2]>=2160 && rr>=100) ultra=1
+          if(wh[1]>=2560 && wh[2]>=1440 && rr>=165) hi=1
+          if(wh[1]>=3840 && wh[2]>=2160 && rr>=60) mid=1
+        }
+
+        if(t ~ /displayManagerPolicy=/){
+          inExt=0
+          extModes=0
+        }
+      }
+
+      if(inPace){
+        if(!paceRenderDone && t ~ /renderRate=/){
+          print "PACE_RENDER=" getrender(t)
+          paceRenderDone=1
+        }
+        if(!paceActiveDone && t ~ /activeMode=\{/){
+          print "PACE_RES=" getres(t)
+          print "PACE_HZ=" gethz(t)
+          paceActiveDone=1
+        }
+        if(t ~ /displayManagerPolicy=/){
+          inPace=0
+        }
+      }
+    }
+
+    END{
+      print "PACE_PHYS=" pacePhys
+      if(ultra) print "LINK_CLASS=14dsc"
+      else if(hi) print "LINK_CLASS=14plus"
+      else if(mid) print "LINK_CLASS=14"
+      else print "LINK_CLASS=12plus"
+    }'
+}
+
+snapv() {
+  key="$1"
+  printf '%s\n' "$SF_SNAPSHOT" | sed -n "s/^${key}=//p" | head -n1
+}
+
+link_label() {
+  case "$1" in
+    14dsc) printf '%s' "DP 1.4+ / DSC class (estimated)" ;;
+    14plus) printf '%s' "DP 1.4+ (estimated)" ;;
+    14) printf '%s' "DP 1.4 class (estimated)" ;;
+    *) printf '%s' "DP 1.2+ (estimated)" ;;
+  esac
+}
+
+preview_file() {
+  printf '%s/%s.conf' "$PREVIEWDIR" "$1"
+}
+
+read_preview() {
+  file="$(preview_file "$1")"
+  [ -f "$file" ] || return 1
+  cat "$file"
+}
+
+preview_value() {
+  token="$1"; key="$2"; file="$(preview_file "$token")"
+  sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n1
+}
+
+cancel_all_previews() {
+  # A new manual display transaction supersedes any older pending preview.
+  # We remove the old watchdog tokens; we do NOT roll them back first.
+  rm -f "$PREVIEWDIR"/*.conf 2>/dev/null
+}
+
+schedule_preview() {
+  token="$1"; prevw="$2"; prevh="$3"; prevhz="$4"; neww="$5"; newh="$6"; newhz="$7"
+  file="$(preview_file "$token")"
+  cat > "$file" <<EOF
+token=$token
+created=$(date +%s)
+seconds=10
+prev_width=$prevw
+prev_height=$prevh
+prev_refresh=$prevhz
+new_width=$neww
+new_height=$newh
+new_refresh=$newhz
+EOF
+  chmod 0600 "$file" 2>/dev/null
+
+  # Backend safety net: even if WebUI becomes invisible, closes, or is killed,
+  # the mode is rolled back after 10 seconds unless "confirm" removed the token.
+  (
+    sleep 10
+    sh "$MODDIR/bin/oahctl" _rollback "$token" >> "$LOG" 2>&1
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+same_mode() {
+  aw="$1"; ah="$2"; ar="$3"; bw="$4"; bh="$5"; br="$6"
+  [ "$aw" = "$bw" ] && [ "$ah" = "$bh" ] || return 1
+  awk -v a="$ar" -v b="$br" 'BEGIN{d=a-b;if(d<0)d=-d;exit(d<0.2?0:1)}'
+}
+
+status_json() {
+  STATE_LINE="$(latest_state_line)"
+  if [ -z "$STATE_LINE" ]; then
+    ensure_engine
+    sleep 0.12
+    STATE_LINE="$(latest_state_line)"
+  fi
+
+  # display-id is compact, so keeping this tiny result in a variable is safe.
+  SFIDS="$(sf_ids)"
+  ext="$(printf '%s\n' "$SFIDS" | awk '/Display [0-9]+ \(HWC display [0-9]+\)/ && $0 !~ /\(HWC display 0\)/ {print;exit}')"
+  if [ -z "$ext" ]; then
+    alive=false; engine_alive && alive=true
+    inj="$(injector_path)"; auto="$(setting auto_enabled)"; [ -z "$auto" ] && auto=0
+    imax=false; internal_max_enabled && imax=true
+    xiaomi=false; is_xiaomi_device && xiaomi=true
+    printf '{"ok":true,"connected":false,"engine":{"ready":%s,"injectorPresent":%s,"injectorPath":"%s","lastError":"%s"},"autoEnabled":%s,' \
+      "$alive" "$([ -n "$inj" ] && echo true || echo false)" "$(jesc "$inj")" "$(jesc "$(st error)")" "$([ "$auto" = 1 ] && echo true || echo false)"
+    printf '"internalMax":{"enabled":%s,"recommended":%s,"vendor":"%s","lastApplied":%s,"modeId":"%s","refresh":"%s","resolution":"%s","physicalId":"%s"}}\n' \
+      "$imax" "$xiaomi" "$(jesc "$(getprop ro.product.manufacturer)")" "$([ "$(getprop debug.oah.internalmax_result)" = 1 ] && echo true || echo false)" \
+      "$(jesc "$(getprop debug.oah.internalmax_mode)")" "$(jesc "$(getprop debug.oah.internalmax_refresh)")" "$(jesc "$(getprop debug.oah.internalmax_resolution)")" "$(jesc "$(getprop debug.oah.internalmax_phys)")"
+    return
+  fi
+  int="$(printf '%s\n' "$SFIDS" | awk '/Display [0-9]+ \(HWC display 0\)/ {print;exit}')"
+  publish_identity "$ext"
+
+  phys="$(parse_phys "$ext")";hwc="$(parse_hwc "$ext")"
+  name="$(parse_name "$ext")";pnp="$(parse_pnp "$ext")";port="$(parse_port "$ext")"
+
+  logical="$(getprop debug.oah.logical)";logicalPhys="$(getprop debug.oah.logical_phys)"
+  if [ "$logicalPhys" != "$phys" ] || [ -z "$logical" ]; then
+    logical="$(find_logical_id "$phys")"
+    setprop debug.oah.logical "$logical"
+    setprop debug.oah.logical_phys "$phys"
+  fi
+
+  # One streamed SurfaceFlinger dump -> tiny snapshot.
+  SF_SNAPSHOT="$(sf_compact_snapshot "$phys")"
+  sfRes="$(snapv EXT_RES)";sfHz="$(snapv EXT_HZ)";renderHz="$(snapv EXT_RENDER)";sfMode="$(snapv EXT_MODE)"
+  pphys="$(snapv PACE_PHYS)";pres="$(snapv PACE_RES)";phz="$(snapv PACE_HZ)";prender="$(snapv PACE_RENDER)"
+  link="$(link_label "$(snapv LINK_CLASS)")"
+
+  eng="$(st engine)";comp="$(st composer)";dmc="$(st dmc)";scheduler="$(st scheduler)"
+  if ! engine_alive; then eng=0; comp=0; dmc=0; scheduler=0; fi
+  inj="$(injector_path)"
+  aw="$(st width)";ah="$(st height)";ar="$(st refresh)";acfg="$(st actualConfig)"
+  [ "$aw" = "-" ]&&aw="";[ "$ah" = "-" ]&&ah="";[ "$ar" = "-" ]&&ar="";[ "$acfg" = "-" ]&&acfg=""
+  actualRes="unknown";[ -n "$aw" ]&&[ -n "$ah" ]&&actualRes="${aw}x${ah}"
+
+  synced=false
+  if [ "$actualRes" != "unknown" ]&&[ -n "$ar" ]&&[ "$sfRes" = "$actualRes" ]&&[ -n "$sfHz" ];then
+    awk -v a="$ar" -v b="$sfHz" 'BEGIN{d=a-b;if(d<0)d=-d;exit(d<0.2?0:1)}'&&synced=true
+  fi
+
+  auto="$(setting auto_enabled)";[ -z "$auto" ]&&auto=0
+  imax=false; internal_max_enabled && imax=true
+  xiaomi=false; is_xiaomi_device && xiaomi=true
+  iphis="$(parse_phys "$int")"
+  prole="unknown"
+  [ -n "$pphys" ]&&[ "$pphys" = "$phys" ]&&prole="external"
+  [ -n "$pphys" ]&&[ -n "$iphis" ]&&[ "$pphys" = "$iphis" ]&&prole="internal"
+
+  printf '{'
+  printf '"ok":true,"connected":true,'
+  printf '"name":"%s","pnpId":"%s","port":"%s",' "$(jesc "${name:-External Display}")" "$(jesc "$pnp")" "$(jesc "$port")"
+  printf '"physicalId":"%s","hwcId":"%s",' "$(jesc "$phys")" "$(jesc "$hwc")"
+  if [ -n "$logical" ];then printf '"logicalId":%s,' "$logical";else printf '"logicalId":null,';fi
+  printf '"actual":{"resolution":"%s","refresh":"%s","configId":"%s"},' "$(jesc "$actualRes")" "$(jesc "${ar:-unknown}")" "$(jesc "$acfg")"
+  printf '"sf":{"resolution":"%s","refresh":"%s","renderRate":"%s","modeId":"%s"},' "$(jesc "${sfRes:-unknown}")" "$(jesc "${sfHz:-unknown}")" "$(jesc "${renderHz:-unknown}")" "$(jesc "$sfMode")"
+  printf '"synced":%s,"linkEstimate":"%s",' "$synced" "$(jesc "$link")"
+  printf '"engine":{"ready":%s,"composerReady":%s,"dmcReady":%s,"schedulerReady":%s,"injectorPresent":%s,"injectorPath":"%s","pid":"%s","lastHwc":"%s","lastDmc":"%s","lastPace":"%s","lastError":"%s"},' \
+    "$([ "$eng" = 1 ]&&echo true||echo false)" "$([ "$comp" = 1 ]&&echo true||echo false)" "$([ "$dmc" = 1 ]&&echo true||echo false)" "$([ "$scheduler" = 1 ]&&echo true||echo false)" \
+    "$([ -n "$inj" ]&&echo true||echo false)" "$(jesc "$inj")" "$(jesc "$(engine_pid)")" \
+    "$(jesc "$(st hwcOk)")" "$(jesc "$(st dmcOk)")" "$(jesc "$(st paceOk)")" "$(jesc "$(st error)")"
+  printf '"pacesetter":{"role":"%s","physicalId":"%s","resolution":"%s","refresh":"%s","renderRate":"%s","external":%s},' \
+    "$(jesc "$prole")" "$(jesc "$pphys")" "$(jesc "${pres:-unknown}")" "$(jesc "${phz:-unknown}")" "$(jesc "${prender:-unknown}")" "$([ "$prole" = external ]&&echo true||echo false)"
+  printf '"autoEnabled":%s,' "$([ "$auto" = 1 ]&&echo true||echo false)"
+  printf '"internalMax":{"enabled":%s,"recommended":%s,"vendor":"%s","lastApplied":%s,"modeId":"%s","refresh":"%s","resolution":"%s","physicalId":"%s"}' \
+    "$imax" "$xiaomi" "$(jesc "$(getprop ro.product.manufacturer)")" "$([ "$(getprop debug.oah.internalmax_result)" = 1 ] && echo true || echo false)" \
+    "$(jesc "$(getprop debug.oah.internalmax_mode)")" "$(jesc "$(getprop debug.oah.internalmax_refresh)")" "$(jesc "$(getprop debug.oah.internalmax_resolution)")" "$(jesc "$(getprop debug.oah.internalmax_phys)")"
+  printf '}\n'
+}
+
+
+modes_json() {
+  ext="$(find_external_line)";[ -z "$ext" ]&&{ echo '{"ok":true,"modes":[]}';return; }
+  phys="$(parse_phys "$ext")"
+  printf '{"ok":true,"modes":['
+  first=1
+  sf_external_block "$phys"|awk '
+    /displayModes=/{m=1;next}
+    m&&/displayManagerPolicy=/{exit}
+    m&&/resolution=/{print}
+  ' | while IFS= read -r line; do
+    id="$(printf '%s\n' "$line"|sed -nE 's/.*\{id=([0-9]+),.*/\1/p')"
+    hid="$(printf '%s\n' "$line"|sed -nE 's/.*hwcId=([0-9]+),.*/\1/p')"
+    res="$(printf '%s\n' "$line"|sed -nE 's/.*resolution=([0-9]+x[0-9]+),.*/\1/p')"
+    hz="$(printf '%s\n' "$line"|sed -nE 's/.*vsyncRate=([0-9]+([.][0-9]+)?) Hz.*/\1/p')"
+    group="$(printf '%s\n' "$line"|sed -nE 's/.*group=([0-9]+),.*/\1/p')"
+    [ -z "$id" ]||[ -z "$res" ]||[ -z "$hz" ]&&continue
+    w="${res%x*}";h="${res#*x}";period="$(period_for_hz "$hz")"
+    [ "$first" -eq 0 ]&&printf ',';first=0
+    printf '{"id":%s,"hwcId":%s,"width":%s,"height":%s,"refresh":%s,"period":%s,"group":%s}' \
+      "$id" "${hid:-$id}" "$w" "$h" "$hz" "$period" "${group:-0}"
+  done
+  printf ']}\n'
+}
+
+apply_mode() {
+  ensure_engine
+  w="$1";h="$2";target="$3";preview="${4:-preview}"
+  ext="$(find_external_line)";[ -z "$ext" ]&&{ echo '{"ok":false,"message":"No external display"}';return 4; }
+  publish_identity "$ext"
+  phys="$(parse_phys "$ext")";hwc="$(parse_hwc "$ext")"
+
+  STATE_LINE="$(latest_state_line)"
+  prevw="$(st width)";prevh="$(st height)";prevhz="$(st refresh)"
+  [ "$prevw" = "-" ]&&prevw="";[ "$prevh" = "-" ]&&prevh="";[ "$prevhz" = "-" ]&&prevhz=""
+  if [ -z "$prevw" ]||[ -z "$prevh" ]||[ -z "$prevhz" ];then
+    prevline="$(active_line "$phys")";prevres="$(parse_resolution "$prevline")";prevhz="$(parse_hz "$prevline")"
+    prevw="${prevres%x*}";prevh="${prevres#*x}"
+  fi
+
+  line="$(mode_line_by_target "$phys" "$w" "$h" "$target")"
+  [ -z "$line" ]&&{ printf '{"ok":false,"message":"Unsupported mode %sx%s @ %s"}\n' "$w" "$h" "$target";return 5; }
+  sfid="$(mode_field "$line" id)";cfg="$(mode_field "$line" hwc)";rr="$(mode_field "$line" hz)";period="$(period_for_hz "$rr")"
+  seq="$(date +%s%N 2>/dev/null)";[ -z "$seq" ]&&seq="$(date +%s)$$"
+
+  set_setting auto_enabled 0
+  send_apply_props "$seq" "$phys" "$hwc" "$sfid" "$cfg" "$w" "$h" "$rr" "$period"
+
+  # Wait for a definitive state. 'pending' is intentionally not success.
+  i=0;hwcok="pending"
+  while [ "$i" -lt 48 ];do
+    STATE_LINE="$(latest_state_line)"
+    if [ "$(st seq)" = "$seq" ];then
+      hv="$(st hwcOk)"
+      if [ "$hv" = "1" ]||[ "$hv" = "0" ];then hwcok="$hv";break;fi
+    fi
+    sleep 0.08;i=$((i+1))
+  done
+  STATE_LINE="$(latest_state_line)"
+  dmcok="$(st dmcOk)";err="$(st error)";aw="$(st width)";ah="$(st height)";ar="$(st refresh)"
+
+  # Some vendor Composer stacks switch the panel first and publish getActiveConfig
+  # / our verification state noticeably later. Earlier builds could therefore report
+  # "HWC switch failed" even though the requested mode was already visible.
+  # Reconcile against the agent's actual HWC attributes before declaring failure.
+  reconciled=0
+  if [ "$hwcok" != "1" ]; then
+    j=0
+    while [ "$j" -lt 12 ]; do
+      STATE_LINE="$(latest_state_line)"
+      aw="$(st width)"; ah="$(st height)"; ar="$(st refresh)"
+      if [ -n "$aw" ] && [ -n "$ah" ] && [ -n "$ar" ] && same_mode "$aw" "$ah" "$ar" "$w" "$h" "$rr"; then
+        hwcok=1
+        err=""
+        dmcok="$(st dmcOk)"
+        reconciled=1
+        break
+      fi
+      sleep 0.12
+      j=$((j+1))
+    done
+  fi
+  if [ "$hwcok" = "pending" ];then hwcok=0;err="hwc_backend_timeout";fi
+
+  preview_json="null"
+  if [ "$preview" = "preview" ]&&[ "$hwcok" = "1" ]&&[ -n "$prevw" ]&&[ -n "$prevh" ]&&[ -n "$prevhz" ];then
+    if ! same_mode "$prevw" "$prevh" "$prevhz" "$w" "$h" "$rr";then
+      cancel_all_previews
+      schedule_preview "$seq" "$prevw" "$prevh" "$prevhz" "$w" "$h" "$rr"
+      preview_json="$(printf '{"token":"%s","seconds":10,"previous":{"width":%s,"height":%s,"refresh":%s},"current":{"width":%s,"height":%s,"refresh":%s}}' \
+        "$(jesc "$seq")" "$prevw" "$prevh" "$prevhz" "$w" "$h" "$rr")"
+    fi
+  fi
+
+  printf '{"ok":true,"seq":"%s","requested":{"width":%s,"height":%s,"refresh":%s,"sfModeId":%s,"hwcConfigId":%s},' "$seq" "$w" "$h" "$rr" "$sfid" "$cfg"
+  printf '"hwcOk":"%s","dmcOk":"%s","error":"%s","reconciled":%s,"actual":{"width":"%s","height":"%s","refresh":"%s"},"preview":%s}\n' \
+    "$(jesc "$hwcok")" "$(jesc "$dmcok")" "$(jesc "$err")" "$([ "$reconciled" = 1 ] && echo true || echo false)" "$(jesc "$aw")" "$(jesc "$ah")" "$(jesc "$ar")" "$preview_json"
+}
+
+confirm_preview() {
+  token="$1"; file="$(preview_file "$token")"
+  if [ -f "$file" ]; then
+    rm -f "$file"
+    printf '{"ok":true,"confirmed":true,"token":"%s","status":' "$(jesc "$token")"
+    status_json | tr -d '\n'
+    printf '}\n'
+  else
+    printf '{"ok":true,"confirmed":false,"expired":true,"token":"%s","status":' "$(jesc "$token")"
+    status_json | tr -d '\n'
+    printf '}\n'
+  fi
+}
+
+rollback_preview() {
+  token="$1"; file="$(preview_file "$token")"
+  if [ ! -f "$file" ]; then
+    printf '{"ok":true,"reverted":false,"expired":true,"token":"%s","status":' "$(jesc "$token")"
+    status_json | tr -d '\n'
+    printf '}\n'
+    return 0
+  fi
+
+  prevw="$(preview_value "$token" prev_width)"
+  prevh="$(preview_value "$token" prev_height)"
+  prevhz="$(preview_value "$token" prev_refresh)"
+
+  # Delete first: makes manual + watchdog rollback race-safe.
+  rm -f "$file"
+
+  echo "$(date '+%F %T') [OAH-PREVIEW] rollback token=$token -> ${prevw}x${prevh}@${prevhz}" >> "$LOG"
+  result="$(apply_mode "$prevw" "$prevh" "$prevhz" nopreview)"
+  printf '{"ok":true,"reverted":true,"token":"%s","result":%s}\n' "$(jesc "$token")" "$result"
+}
+
+
+sync_actual() {
+  ensure_engine
+  ext="$(find_external_line)";[ -z "$ext" ]&&{ echo '{"ok":false,"message":"No external display"}';return 4; }
+  publish_identity "$ext"
+  phys="$(parse_phys "$ext")";hwc="$(parse_hwc "$ext")"
+
+  STATE_LINE="$(latest_state_line)"
+  aw="$(st width)";ah="$(st height)";ar="$(st refresh)";cfg="$(st actualConfig)"
+  [ "$aw" = "-" ]&&aw="";[ "$ah" = "-" ]&&ah="";[ "$ar" = "-" ]&&ar="";[ "$cfg" = "-" ]&&cfg=""
+  [ -z "$aw" ]||[ -z "$ah" ]||[ -z "$ar" ]||[ -z "$cfg" ]&&{ echo '{"ok":false,"message":"Actual HWC state unavailable"}';return 5; }
+
+  line="$(mode_line_by_target "$phys" "$aw" "$ah" "$ar")"
+  [ -z "$line" ]&&{ echo '{"ok":false,"message":"No SF mode matches actual HWC mode"}';return 6; }
+  sfid="$(mode_field "$line" id)";rr="$(mode_field "$line" hz)";period="$(period_for_hz "$rr")"
+  seq="$(date +%s%N 2>/dev/null)";[ -z "$seq" ]&&seq="$(date +%s)$$"
+
+  setprop debug.oah.action sync
+  setprop debug.oah.phys "$phys"
+  setprop debug.oah.hwc "$hwc"
+  setprop debug.oah.sfmode "$sfid"
+  setprop debug.oah.config "$cfg"
+  setprop debug.oah.width "$aw"
+  setprop debug.oah.height "$ah"
+  setprop debug.oah.refresh "$rr"
+  setprop debug.oah.period "$period"
+  setprop debug.oah.seq "$seq"
+
+  # Wait for this exact sync request to finish. Alpha3.5 used a fixed 600ms
+  # sleep and could read status before DMC/SF had published the new mode.
+  i=0
+  while [ "$i" -lt 24 ]; do
+    STATE_LINE="$(latest_state_line)"
+    if [ "$(st seq)" = "$seq" ]; then
+      dv="$(st dmcOk)"
+      [ "$dv" = "1" ] || [ "$dv" = "0" ] && break
+    fi
+    sleep 0.08
+    i=$((i+1))
+  done
+  sleep 0.10
+  status_json
+}
+
+
+set_auto() {
+  en="$1";[ "$en" = 1 ]||en=0
+  [ "$en" = 1 ] && ensure_engine >/dev/null 2>&1
+  set_setting auto_enabled "$en"
+
+  if [ "$en" = 1 ]; then
+    # Apply highest refresh at the current real HWC resolution if available,
+    # otherwise use SF current resolution.
+    ext="$(find_external_line)";[ -z "$ext" ]&&{ echo '{"ok":true,"enabled":true,"applied":false}';return; }
+    phys="$(parse_phys "$ext")"
+    aw="$(st width)";ah="$(st height)"
+    if [ "$aw" = "-" ]||[ -z "$aw" ]||[ "$ah" = "-" ]||[ -z "$ah" ];then
+      res="$(parse_resolution "$(active_line "$phys")")";aw="${res%x*}";ah="${res#*x}"
+    fi
+
+    best="$(best_refresh_for_resolution "$phys" "$aw" "$ah")"
+    if [ -n "$best" ]; then
+      # apply_mode will disable auto, so restore after call.
+      result="$(apply_mode "$aw" "$ah" "$best" nopreview)"
+      set_setting auto_enabled 1
+      printf '{"ok":true,"enabled":true,"applied":true,"result":%s}\n' "$result"
+    else
+      echo '{"ok":true,"enabled":true,"applied":false}'
+    fi
+  else
+    echo '{"ok":true,"enabled":false}'
+  fi
+}
+
+set_pacesetter() {
+  ensure_engine
+  mode="$1"
+  ext="$(find_external_line)";int="$(find_internal_line)"
+  [ -z "$int" ]&&{ echo '{"ok":false,"message":"Internal display not found"}';return 4; }
+  ip="$(parse_phys "$int")"
+
+  if [ "$mode" = "external" ] || [ "$mode" = "1" ]; then
+    [ -z "$ext" ]&&{ echo '{"ok":false,"message":"No external display"}';return 5; }
+    ep="$(parse_phys "$ext")"
+    # Known-good order from earlier testing: DMC/SF external mode first,
+    # then promote external pacesetter.
+    sync_actual >/dev/null 2>&1
+    target="$ep"
+    setprop debug.oah.pace_enabled 1
+  else
+    target="$ip"
+    setprop debug.oah.pace_enabled 0
+  fi
+
+  seq="$(date +%s%N 2>/dev/null)";[ -z "$seq" ]&&seq="$(date +%s)$$"
+  setprop debug.oah.action pace
+  setprop debug.oah.pacephys "$target"
+  setprop debug.oah.seq "$seq"
+
+  # Agent acknowledgement.
+  i=0
+  while [ "$i" -lt 24 ]; do
+    STATE_LINE="$(latest_state_line)"
+    if [ "$(st seq)" = "$seq" ]; then
+      pv="$(st paceOk)"
+      [ "$pv" = "1" ] || [ "$pv" = "0" ] && break
+    fi
+    sleep 0.08
+    i=$((i+1))
+  done
+
+  # Real scheduler verification from SurfaceFlinger, not from our saved switch.
+  verified=false
+  i=0
+  while [ "$i" -lt 18 ]; do
+    real="$(dumpsys SurfaceFlinger 2>/dev/null | awk '
+      {x=$0;gsub(/^[ \t]+|[ \t]+$/,"",x)}
+      x ~ /^Pacesetter Display [0-9]+$/ {split(x,a," ");print a[3];exit}')"
+    if [ "$real" = "$target" ]; then verified=true;break;fi
+    sleep 0.10
+    i=$((i+1))
+  done
+
+  status_json
+}
+
+
+restart_engine() {
+  started="$(date +%s)"
+  oldpid="$(engine_pid)"
+  inj="$(injector_path)"
+
+  # Stop only our agent/supervisor. SurfaceFlinger itself is never killed here.
+  ps -A -o PID,ARGS 2>/dev/null | awk '
+    /[f]ij1673/ && /oah_v2_agent\.js/ {print $1}
+    /[e]ngine_supervisor\.sh/ {print $1}
+  ' | sort -u | while read -r p; do
+    [ -n "$p" ] && kill "$p" 2>/dev/null
+  done
+
+  setprop debug.oah.seq ""
+  # Drop stale OAH-STATE lines so a freshly spawned fij1673 cannot be mistaken
+  # for a ready agent before the new JS agent has actually initialized.
+  : > "$LOG" 2>/dev/null
+  sleep 0.20
+  sh "$MODDIR/bin/engine_supervisor.sh" >/dev/null 2>&1 &
+
+  ready=false
+  i=0
+  while [ "$i" -lt 45 ]; do
+    if engine_alive; then
+      STATE_LINE="$(latest_state_line)"
+      if [ "$(st engine)" = "1" ]; then ready=true; break; fi
+    fi
+    sleep 0.12
+    i=$((i+1))
+  done
+
+  printf '{"ok":true,"restartRequested":true,"ready":%s,"oldPid":"%s","newPid":"%s","injectorPresent":%s,"injectorPath":"%s","startedAt":"%s","status":' \
+    "$ready" "$(jesc "$oldpid")" "$(jesc "$(engine_pid)")" "$([ -n "$inj" ] && echo true || echo false)" "$(jesc "$inj")" "$(jesc "$started")"
+  status_json | tr -d '\n'
+  printf '}\n'
+}
+
+raw_json() {
+  STATE_LINE="$(latest_state_line)"
+  printf '{'
+  printf '"ok":true,"latestState":"%s",' "$(jesc "$(latest_state_line)")"
+  printf '"properties":{"seq":"%s","action":"%s","phys":"%s","hwc":"%s","config":"%s","sfmode":"%s","refresh":"%s","pacephys":"%s","paceEnabled":"%s","internalMaxPhys":"%s","internalMaxMode":"%s","internalMaxRefresh":"%s","internalMaxResult":"%s"},' \
+    "$(jesc "$(getprop debug.oah.seq)")" "$(jesc "$(getprop debug.oah.action)")" "$(jesc "$(getprop debug.oah.phys)")" \
+    "$(jesc "$(getprop debug.oah.hwc)")" "$(jesc "$(getprop debug.oah.config)")" "$(jesc "$(getprop debug.oah.sfmode)")" "$(jesc "$(getprop debug.oah.refresh)")" \
+    "$(jesc "$(getprop debug.oah.pacephys)")" "$(jesc "$(getprop debug.oah.pace_enabled)")" "$(jesc "$(getprop debug.oah.internalmax_phys)")" \
+    "$(jesc "$(getprop debug.oah.internalmax_mode)")" "$(jesc "$(getprop debug.oah.internalmax_refresh)")" "$(jesc "$(getprop debug.oah.internalmax_result)")"
+  pending="$(ls "$PREVIEWDIR"/*.conf 2>/dev/null | head -n1)"
+  ptoken=""; [ -n "$pending" ] && ptoken="$(basename "$pending" .conf)"
+  printf '"pendingPreview":"%s",' "$(jesc "$ptoken")"
+  printf '"processes":"%s"' "$(jesc "$(ps -A -o PID,ARGS 2>/dev/null|grep '[f]ij1673')")"
+  printf '}\n'
+}
+
+case "$1" in
+  status|"") status_json ;;
+  modes) modes_json ;;
+  apply) apply_mode "$2" "$3" "$4" preview ;;
+  confirm) confirm_preview "$2" ;;
+  revert) rollback_preview "$2" ;;
+  _rollback) rollback_preview "$2" >/dev/null 2>&1 ;;
+  auto) set_auto "$2" ;;
+  _auto_hotplug) [ "$(setting auto_enabled)" = "1" ] && set_auto 1 || echo '{"ok":true,"enabled":false,"skipped":true}' ;;
+  internal-max) set_internal_max_lock "$2" ;;
+  _internal_max_hotplug) apply_internal_max_lock hotplug ;;
+  sync) sync_actual ;;
+  pace) set_pacesetter "$2" ;;
+  raw) raw_json ;;
+  engine) ensure_engine;status_json ;;
+  engine-restart) restart_engine ;;
+  version) echo '{"ok":true,"version":"2.0.0-canary1","protocol":12,"ipc":"system_property+log+binder1035","previewRollback":10,"experimentalPacesetter":true,"fastStatus":true,"compactSF":true,"hwcRetry":3,"v1Fusion":true,"engineRecovery":true,"autoHotplug":true,"internalMaxLock":true,"explicitPhysicalDisplayId":true,"hwcLateReconcile":true,"uiPollOptimized":true,"firstRunAgreement":true}' ;;
+  *) printf '{"ok":false,"message":"Unknown command: %s"}\n' "$(jesc "$1")";exit 2 ;;
+esac

@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#f5f6f8" />
+  <title>OPlusAutoHR V2 Canary 1.0</title>
+  <link rel="stylesheet" href="/internal/insets.css" />
+  <link rel="stylesheet" href="./app.css" />
+</head>
+<body class="agreement-pending">
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">EXTERNAL DISPLAY</div>
+        <h1>OPlusAutoHR <span>Canary</span></h1>
+      </div>
+      <button id="refreshBtn" class="icon-btn" aria-label="刷新">↻</button>
+    </header>
+
+    <section id="deviceCard" class="hero card">
+      <div class="status-line">
+        <span id="dot" class="dot"></span>
+        <span id="connectionText">正在读取显示器…</span>
+      </div>
+      <div class="device-row">
+        <div>
+          <h2 id="displayName">External Display</h2>
+          <div id="displaySub" class="muted">等待 SurfaceFlinger</div>
+        </div>
+        <div class="mode-big">
+          <strong id="heroHz">—</strong>
+          <span>Hz</span>
+        </div>
+      </div>
+      <div class="hero-grid">
+        <div><span>分辨率</span><b id="heroRes">—</b></div>
+        <div><span>逻辑显示器</span><b id="heroLogical">—</b></div>
+        <div><span>HWC</span><b id="heroHwc">—</b></div>
+        <div><span>物理 ID</span><b id="heroPhysical" class="mono small">—</b></div>
+      </div>
+    </section>
+
+    <section class="section-title">
+      <h3>显示设置</h3>
+      <span id="alphaBadge" class="badge">Canary 1.0</span>
+    </section>
+
+    <section class="card settings">
+      <label>
+        <span>分辨率</span>
+        <select id="resolutionSelect" disabled>
+          <option>正在枚举模式…</option>
+        </select>
+      </label>
+      <div class="divider"></div>
+      <label>
+        <span>刷新率</span>
+        <select id="refreshSelect" disabled>
+          <option>—</option>
+        </select>
+      </label>
+      <div class="divider"></div>
+      <div class="switch-row">
+        <div>
+          <b>自动最高刷新率</b>
+          <small>插入显示器后自动选择安全的最高模式</small>
+        </div>
+        <button id="autoSwitch" class="switch" disabled aria-label="自动最高刷新率"><i></i></button>
+      </div>
+      <div class="divider"></div>
+      <div class="switch-row">
+        <div>
+          <div class="setting-title-line">
+            <b>HyperOS 内屏高刷修复</b>
+            <em id="internalMaxTag" class="recommend-tag">Xiaomi 默认开启</em>
+          </div>
+          <small id="internalMaxMeta">外屏连接时，将内屏锁定到原生分辨率组的最高刷新率，避免外屏调度被低刷内屏拖住。</small>
+        </div>
+        <button id="internalMaxSwitch" class="switch" disabled aria-label="HyperOS 内屏高刷修复"><i></i></button>
+      </div>
+      <button id="applyBtn" class="primary" disabled>应用显示模式</button>
+      <p class="hint">Canary 1.0：HyperOS 使用 SurfaceFlinger 1035 + 显式内屏 PhysicalDisplayId 锁定最高原生刷新率。关闭修复后不会主动解除当前锁定，重启后恢复系统默认策略。</p>
+    </section>
+
+    <section class="section-title"><h3>链路与同步</h3></section>
+    <section class="card info-list">
+      <div><span>连接协议</span><b id="linkType">DisplayPort</b></div>
+      <div><span>协议能力</span><b id="linkEstimate">—</b></div>
+      <div><span>PNP ID</span><b id="pnpId">—</b></div>
+      <div><span>端口</span><b id="portId">—</b></div>
+      <div>
+        <span>HWC / SurfaceFlinger</span>
+        <b id="syncState" class="state neutral">正在读取</b>
+      </div>
+      <div>
+        <span>HWC 控制引擎</span>
+        <b id="engineState">正在连接</b>
+      </div>
+      <div id="engineRecoveryRow" class="engine-recovery" hidden>
+        <div>
+          <span>HWC 控制引擎离线</span>
+          <small id="engineRecoveryHint">可尝试重新注入控制引擎，不会主动重启 SurfaceFlinger。</small>
+        </div>
+        <button id="restartEngineBtn" class="mini-btn recovery-btn">尝试重启 HWC 控制引擎</button>
+      </div>
+      <div class="sync-action">
+        <span>状态不同步时</span>
+        <button id="syncBtn" class="mini-btn">同步到实际输出</button>
+      </div>
+    </section>
+
+
+    <section class="section-title">
+      <h3>调度监视器</h3>
+      <span class="live-badge"><i></i> LIVE</span>
+    </section>
+    <section class="card scheduler-card">
+      <div class="monitor-grid">
+        <div><span>实际 HWC 输出</span><b id="monitorHwc">—</b></div>
+        <div><span>SurfaceFlinger</span><b id="monitorSf">—</b></div>
+        <div><span>当前 Pacesetter</span><b id="monitorPaceRole">—</b></div>
+        <div><span>Pacesetter Render</span><b id="monitorPaceRate">—</b></div>
+      </div>
+      <div class="pace-detail">
+        <span>物理 ID</span>
+        <b id="monitorPacePhys" class="mono">—</b>
+      </div>
+      <div class="divider"></div>
+      <div class="switch-row experimental-row">
+        <div>
+          <div class="experimental-title">
+            <b>External pacesetter</b>
+            <em class="danger-tag">⚠ 高危实验性</em>
+          </div>
+          <small>强制外屏成为 SurfaceFlinger 调度基准，可突破内屏刷新率上限；可能导致内屏低刷新、热插拔卡顿或 SurfaceFlinger 异常。</small>
+        </div>
+        <button id="paceSwitch" class="switch" disabled aria-label="External pacesetter"><i></i></button>
+      </div>
+      <p id="paceHint" class="pace-hint">Scheduler 状态正在读取…</p>
+    </section>
+
+    <details class="card debug">
+      <summary>诊断信息</summary>
+      <pre id="debugText">Loading…</pre>
+      <button id="rawBtn" class="secondary">读取原始状态</button>
+    </details>
+
+    <footer>
+      <b>OPlusAutoHR V2 Canary</b>
+      <span>Canary 1.0 · Xiaomi / OPlus verified · V1 Fusion</span>
+      <span class="authors">Kimu / 酷安 @苦力小怕 / 酷安 @念来过倒别叫你 / ChatGPT</span>
+      <button id="openAgreementBtn" class="footer-link" type="button">使用协议与免责声明</button>
+    </footer>
+  </main>
+
+
+  <div id="agreementBackdrop" class="agreement-backdrop" hidden>
+    <section class="agreement-dialog" role="dialog" aria-modal="true" aria-labelledby="agreementTitle">
+      <header class="agreement-head">
+        <div>
+          <div class="eyebrow">OPlusAutoHR · CANARY 1.0</div>
+          <h2 id="agreementTitle">使用协议与免责声明</h2>
+        </div>
+        <span class="agreement-version">协议 v1.0</span>
+      </header>
+
+      <div id="agreementBody" class="agreement-body">
+        <p class="agreement-lead"><strong>请在使用前完整阅读。</strong> 本项目涉及 Android 底层显示组件、SurfaceFlinger 与 Hardware Composer，属于学习、研究与实验性软件。</p>
+
+        <h3>1. 项目性质</h3>
+        <p>OPlusAutoHR 当前以<strong>源码公开（Source Available）</strong>形式提供，项目代码不主动进行商业混淆，主要用于个人学习、技术研究、交流与非商业用途。本项目不是 OnePlus、OPPO、realme、Xiaomi、Redmi、POCO、Google 或其他厂商的官方软件，与相关厂商不存在隶属、授权或合作关系。</p>
+
+        <h3>2. 允许用途</h3>
+        <p>允许个人学习、技术研究、非商业测试、修改与二次开发，以及在保留项目来源和作者信息的前提下进行非商业技术交流。</p>
+
+        <h3>3. 禁止用途</h3>
+        <p>未经作者明确许可，不得将本项目或修改版本用于商业销售、收费服务、付费刷机、会员功能、付费整合包或其他直接盈利行为；不得删除、篡改或故意隐藏原作者与项目来源后重新发布；不得冒充官方版本；不得用于违反适用法律法规、侵害他人合法权益、破坏设备或信息系统等非法用途。</p>
+
+        <h3>4. 技术风险</h3>
+        <p>本项目可能依赖 Root、Magisk / KernelSU 等环境，并可能改变显示模式和系统调度。使用过程中可能出现 SurfaceFlinger 异常或重启、系统卡顿/冻结/黑屏、热插拔异常、刷新率或分辨率异常、设备重启、功耗增加及 ROM/厂商实现差异造成的不兼容。标记为“高危实验性”的功能具有更高风险。</p>
+
+        <h3>5. 免责声明</h3>
+        <p>本项目按“现状（AS IS）”提供，不对适用性、稳定性、兼容性、完整性或特定用途作明示或默示保证。在适用法律允许的最大范围内，因安装、使用、修改、传播本项目或使用第三方修改版本而产生的设备故障、数据损失、经济损失、业务中断或其他直接/间接损失，由使用者自行承担相应风险。本条款不排除依法不得排除或限制的责任。</p>
+
+        <h3>6. 第三方修改与分发</h3>
+        <p>第三方修改版本不代表原作者的意见或质量保证。修改、整合或重新分发时应明确标记为第三方版本并保留来源，不得使用户误认为由原作者直接发布或维护。原作者不对未经确认的第三方版本承担维护、技术支持或质量保证责任。</p>
+
+        <h3>7. 免费与非商业声明</h3>
+        <p><strong>本项目目前免费提供。</strong> 若您通过付费渠道获得，请警惕第三方倒卖。当前未授权未经许可的商业使用或以本项目直接盈利；未来如授权方式发生变化，以项目发布页面、LICENSE / 授权文件或最新版协议为准。</p>
+
+        <h3>8. 作者与协作</h3>
+        <p>Kimu / 酷安 @苦力小怕 / 酷安 @念来过倒别叫你 / ChatGPT</p>
+
+        <h3>9. 协议更新</h3>
+        <p>随着功能与授权方式变化，本协议可能更新。重大条款变化时，WebUI 可要求重新阅读并确认新版本。</p>
+      </div>
+
+      <div id="agreementChecks" class="agreement-checks">
+        <label><input id="agreeTermsCheck" type="checkbox"> <span>我已阅读、理解并同意上述使用协议与免责声明。</span></label>
+        <label><input id="agreeRiskCheck" type="checkbox"> <span>我理解本项目具有系统级修改风险，并承诺仅用于合法、非商业的学习/研究用途。</span></label>
+      </div>
+
+      <div id="agreementFirstActions" class="agreement-actions">
+        <button id="declineAgreementBtn" class="agreement-secondary" type="button">不同意</button>
+        <button id="acceptAgreementBtn" class="agreement-primary" type="button" disabled>同意并继续</button>
+      </div>
+      <div id="agreementReviewActions" class="agreement-actions single" hidden>
+        <button id="closeAgreementBtn" class="agreement-primary" type="button">返回 WebUI</button>
+      </div>
+      <p id="agreementDeclinedHint" class="agreement-declined" hidden>你尚未同意协议，WebUI 控制功能不会启动。可重新勾选并选择“同意并继续”。</p>
+    </section>
+  </div>
+
+  <div id="modeConfirmBackdrop" class="modal-backdrop" hidden>
+    <section class="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="modeConfirmTitle">
+      <div class="confirm-icon">✓</div>
+      <h3 id="modeConfirmTitle">保留这些显示设置吗？</h3>
+      <p class="confirm-copy">
+        如果画面显示异常，将在 <strong id="modeCountdown">10</strong> 秒后自动还原。
+      </p>
+      <div class="mode-preview">
+        <div>
+          <span>之前</span>
+          <b id="previousModeText">—</b>
+        </div>
+        <i>→</i>
+        <div>
+          <span>现在</span>
+          <b id="currentModeText">—</b>
+        </div>
+      </div>
+      <div class="confirm-actions">
+        <button id="revertModeBtn" class="dialog-secondary">还原</button>
+        <button id="keepModeBtn" class="dialog-primary">保留更改 · <span id="keepCountdown">10</span></button>
+      </div>
+      <small class="confirm-footnote">安全计时由后台执行，关闭此页面也会自动还原。</small>
+    </section>
+  </div>
+
+
+  <div id="paceWarnBackdrop" class="modal-backdrop" hidden>
+    <section class="confirm-dialog warning-dialog" role="dialog" aria-modal="true">
+      <div class="warning-icon">!</div>
+      <h3>启用 External pacesetter？</h3>
+      <p class="confirm-copy">
+        这是高风险实验性调度功能，会强制外接屏成为 SurfaceFlinger 的 Pacesetter。已知部分设备可能出现内屏低刷新、热插拔后严重卡顿/近似冻结，甚至 SurfaceFlinger 异常。
+      </p>
+      <div class="warning-points">
+        <span>• 开启前会先同步当前外屏 HWC / SF 模式</span>
+        <span>• 关闭开关会恢复内屏 Pacesetter</span>
+        <span>• 热插拔恢复仍不稳定；如出现异常，重新插入外屏或重启设备</span>
+      </div>
+      <div class="confirm-actions">
+        <button id="cancelPaceBtn" class="dialog-secondary">取消</button>
+        <button id="enablePaceBtn" class="dialog-warning">仍然启用</button>
+      </div>
+    </section>
+  </div>
+
+  <div id="snack" class="snack"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

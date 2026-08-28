@@ -1,0 +1,24 @@
+name: Feature request / 功能建议
+description: Suggest a new feature or platform support
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: request
+    attributes:
+      label: 功能需求
+      description: 你希望增加什么？解决什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 使用场景 / 技术背景
+  - type: input
+    id: device
+    attributes:
+      label: 相关机型 / 平台（如适用）
+  - type: input
+    id: rom
+    attributes:
+      label: Android / ROM（如适用）

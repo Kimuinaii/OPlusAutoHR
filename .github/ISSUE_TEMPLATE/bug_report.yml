@@ -1,0 +1,123 @@
+name: Bug report / 兼容性问题
+description: Report display, hotplug, WebUI, HWC or SurfaceFlinger issues
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请尽量完整填写。不要上传账号 Token、私钥、设备序列号或其他隐私信息。
+  - type: input
+    id: device
+    attributes:
+      label: 机型 / Device
+      placeholder: Xiaomi Pad 7 Pro / OnePlus 15
+    validations:
+      required: true
+  - type: input
+    id: codename
+    attributes:
+      label: 设备代号 / Codename
+      placeholder: muyu
+  - type: input
+    id: soc
+    attributes:
+      label: 处理器 / SoC
+      placeholder: Qualcomm Snapdragon ...
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android 版本
+      placeholder: Android 16
+    validations:
+      required: true
+  - type: input
+    id: rom
+    attributes:
+      label: 系统 / ROM 及完整版本
+      placeholder: HyperOS 3.x / OxygenOS 16.x
+    validations:
+      required: true
+  - type: input
+    id: root
+    attributes:
+      label: Root 方案及版本
+      placeholder: Magisk / KernelSU / APatch
+  - type: input
+    id: module
+    attributes:
+      label: OPlusAutoHR 版本
+      placeholder: V2 Canary 1.0
+    validations:
+      required: true
+  - type: input
+    id: monitor
+    attributes:
+      label: 显示器型号与目标模式
+      placeholder: ROG ..., 2560x1440@180Hz
+    validations:
+      required: true
+  - type: input
+    id: dock
+    attributes:
+      label: 扩展坞 / 转接器
+      placeholder: 品牌、型号、主控（如已知）
+    validations:
+      required: true
+  - type: input
+    id: protocol
+    attributes:
+      label: 连接协议 / 线材
+      placeholder: USB-C DP Alt Mode -> DP 1.4 / HDMI 2.1 / USB4
+    validations:
+      required: true
+  - type: dropdown
+    id: pacesetter
+    attributes:
+      label: External Pacesetter
+      options:
+        - "关闭 / Off"
+        - "开启 / On"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述与期望结果
+      description: 实际发生了什么？你希望发生什么？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 重启设备
+        2. 插入扩展坞
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: oahctl status
+      render: shell
+  - type: textarea
+    id: log
+    attributes:
+      label: engine.log（相关部分）
+      render: text
+  - type: textarea
+    id: sf
+    attributes:
+      label: SurfaceFlinger 状态（如可提供）
+      render: text
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: 确认
+      options:
+        - label: 我已移除日志中的敏感信息，并确认问题可复现。
+          required: true

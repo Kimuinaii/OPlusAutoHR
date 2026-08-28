@@ -1,0 +1,33 @@
+# Logs / temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# IDE
+.idea/
+.vscode/
+
+# Build / generated output
+build/
+dist/
+out/
+
+# Local environment / secrets
+.env
+.env.*
+local.properties
+*.keystore
+*.jks
+*.pem
+*.key
+
+# Local debug artifacts
+debug/
+logs/
+*.trace
+
+# OS metadata
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+id=oplusautohr.v2
+name=OPlusAutoHR V2 Canary
+version=2.0.0-canary1
+versionCode=201000
+author=Kimu / 酷安 @苦力小怕 / 酷安 @念来过倒别叫你 / ChatGPT
+description=Canary 1.0: Xiaomi/HyperOS + OPlus verified external high-refresh control, HWC late-success reconciliation, smoother WebUI, first-run agreement gate, HyperOS internal max-refresh fix, and high-risk External Pacesetter warning.
