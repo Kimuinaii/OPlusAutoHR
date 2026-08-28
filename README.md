@@ -81,43 +81,84 @@ OPlusAutoHR 会协调显示链路的多个层级，在厂商实现允许的情�
 
 ## 实现路径
 
+下面这张图按 Canary 1.0 **实际代码执行顺序**整理。外屏 HWC / SurfaceFlinger 同步是公共主链；HyperOS 内屏最高刷修复是一条独立附加支线，不会替代外屏主链。
+
 ```mermaid
 flowchart TD
-    A[外接显示器连接] --> B[识别物理显示器]
-    B --> C[枚举 HWC / SF 显示模式]
-    C --> D[选择分辨率 + 刷新率]
-    D --> E[切换 HWC Config]
-    E --> F[同步 SurfaceFlinger DisplayModeController]
-    F --> G[验证 ActiveMode / renderRate / 实际 HWC 输出]
-    G --> H[WebUI 实时状态]
+    A["外接显示器连接或 SurfaceFlinger 重启"] --> B["Supervisor 识别内屏与外屏 PhysicalDisplayId / HWC display"]
+    B --> C["确保 Frida Agent 绑定当前 SurfaceFlinger"]
+    C --> C1["解析 Composer3 接口、DMC 与 Scheduler 符号"]
+    C1 --> D["读取外屏 SF DisplayMode，并映射 HWC config"]
 
-    B --> I{ROM / 厂商}
-    I -->|OxygenOS / ColorOS| J[OPlus HWC + DMC 路径]
-    I -->|HyperOS| K[识别内屏物理显示器]
-    K --> L[枚举内屏真实模式]
-    L --> M[在原生 / 最高分辨率组中选择最高刷新率]
-    M --> N[SurfaceFlinger 1035 + 显式 PhysicalDisplayId]
-    N --> O[将内屏锁定至最高原生刷新率]
-    O --> G
+    B --> X{"内屏最高刷修复已启用？"}
+    X -->|是| X1["枚举内屏真实 SF DisplayMode"]
+    X1 --> X2["选择最高像素面积分辨率"]
+    X2 --> X3["在该分辨率下选择最高刷新率"]
+    X3 --> X4["SurfaceFlinger 1035：modeId + 内屏 PhysicalDisplayId"]
+    X4 --> X5["验证内屏 activeMode"]
+    X -->|否| X6["跳过内屏锁定"]
 
-    P[External Pacesetter - 实验性] --> Q[将外屏提升为 Scheduler Pacesetter]
-    Q --> R[可能突破内屏刷新率调度上限]
-    R --> S[更高的热插拔 / SF 异常风险]
+    D --> E{"目标模式来源"}
+    E -->|手动| E1["用户选择分辨率 + 刷新率"]
+    E -->|Auto Highest| E2["保持当前实际 HWC 分辨率"]
+    E2 --> E3["选择该分辨率最高刷新率"]
+    E1 --> F["发布 apply 请求给 Agent"]
+    E3 --> F
+
+    F --> G["Composer3 setActiveConfigWithConstraints"]
+    G --> H["验证 getActiveConfig / HWC 属性"]
+    H -->|尚未稳定| H1["最多 3 次重试 + late reconciliation"]
+    H1 --> H
+    H -->|成功| I["DisplayModeController setActiveMode 同步 SF"]
+    H -->|失败| HF["返回 HWC 切换失败状态"]
+    I --> J["刷新实际 HWC 状态"]
+    J --> K["验证 ActiveMode / renderRate / 实际 HWC 输出"]
+    X5 --> K
+    X6 --> K
+    K --> L["WebUI / 调度监视器"]
+
+    K --> P{"启用 External Pacesetter？"}
+    P -->|否| L
+    P -->|是| P1["sync_actual：按实际 HWC 模式再次同步 SF"]
+    P1 --> P2["发送 pace 请求"]
+    P2 --> P3{"Scheduler 调用路径"}
+    P3 -->|OOS / legacy resolver| P4["直接调用 setPacesetterDisplay"]
+    P3 -->|HyperOS / exact-export fallback| P5["排队到 SF main-thread commit 再调用"]
+    P4 --> P6["dumpsys 验证真实 Pacesetter"]
+    P5 --> P6
+    P6 --> P7["可能突破内屏调度刷新率上限"]
+    P7 --> P8["高风险：内屏低刷 / 热插拔卡顿或近冻结 / SF 异常"]
+    P6 --> L
 ```
 
-### Android 显示链路
+### Android 显示链路与模块介入点
 
 ```mermaid
 flowchart LR
-    A[DisplayManager] --> B[SurfaceFlinger]
-    B --> C[DisplayModeController]
-    B --> D[Scheduler / Pacesetter]
-    C --> E[Hardware Composer]
-    D --> E
-    E --> F[Composer HAL / 厂商显示栈]
-    F --> G[USB-C / DP / HDMI 链路]
-    G --> H[外接显示器]
+    A["DisplayManager / Framework"] --> B["SurfaceFlinger"]
+    B --> C["DisplayModeController"]
+    B --> D["Scheduler / Pacesetter"]
+    B --> E["Composer3 / Hardware Composer client"]
+    C --> E
+    E --> F["Vendor Composer HAL / Display Driver"]
+    F --> G["USB-C / DP / HDMI 链路"]
+    G --> H["外接显示器"]
+    D --> I["Frame pacing / render cadence"]
+
+    O["OPlusAutoHR Agent"] -.-> C
+    O -.-> D
+    O -.-> E
+    X["HyperOS 1035 内屏锁定"] -.-> B
 ```
+
+### 代码核对说明
+
+- **HyperOS 内屏最高刷修复与 Auto Highest 相互独立。** Hot-plug 后 Supervisor 会先尝试内屏修复；只有 `auto_enabled=1` 时才继续执行外屏 Auto Highest。
+- **Auto Highest 不会全局寻找“最大分辨率 + 最大 Hz”的拼接组合。** 它保持当前实际 HWC 分辨率，并选择该分辨率真实存在的最高刷新率。
+- **手动 / 自动外屏切换都会先让 HWC 真正切换。** Agent 只有在 HWC 已匹配目标模式后才调用 `DisplayModeController::setActiveMode()` 同步 SurfaceFlinger。
+- **HWC 成功判定包含重试与 late reconciliation。** 当前 Agent 最多进行 3 次 Composer 请求，并允许厂商 `getActiveConfig` 晚到后重新判定成功。
+- **HyperOS 1035 路径使用真实内屏 modeId + 显式 PhysicalDisplayId。** 当前实现按最高像素面积选择分辨率，再在该分辨率中选择最高刷新率；没有写死 144 Hz、modeId 或设备 ID。
+- **External Pacesetter 开启前会先执行 `sync_actual`。** OOS legacy 路径可直接调用 Scheduler；HyperOS exact-export 路径会把调用排队到 SurfaceFlinger 主线程的 `commit()` 路径。Hot-unplug 虽有恢复尝试，但该实验功能目前仍属于高风险。
 
 ---
 
@@ -417,43 +458,84 @@ OPlusAutoHR coordinates multiple layers of the display pipeline so that the phys
 
 ## How it works
 
+The diagram below follows the **actual Canary 1.0 execution order**. External HWC / SurfaceFlinger synchronization is the common main path; the HyperOS internal max-refresh fix is an independent auxiliary branch and does not replace the external-display path.
+
 ```mermaid
 flowchart TD
-    A[External display connected] --> B[Detect physical displays]
-    B --> C[Enumerate HWC / SF display modes]
-    C --> D[Select resolution + refresh rate]
-    D --> E[Switch HWC config]
-    E --> F[SurfaceFlinger DisplayModeController sync]
-    F --> G[Verify ActiveMode / renderRate / actual HWC output]
-    G --> H[WebUI live status]
+    A["External display connected or SurfaceFlinger restarted"] --> B["Supervisor detects internal / external PhysicalDisplayId and HWC display"]
+    B --> C["Ensure Frida Agent is attached to the current SurfaceFlinger"]
+    C --> C1["Resolve Composer3 interfaces plus DMC / Scheduler symbols"]
+    C1 --> D["Read external SF DisplayMode and map it to HWC config"]
 
-    B --> I{Vendor / ROM}
-    I -->|OxygenOS / ColorOS| J[OPlus HWC + DMC path]
-    I -->|HyperOS| K[Detect internal physical display]
-    K --> L[Enumerate real internal modes]
-    L --> M[Choose highest refresh in native/highest resolution group]
-    M --> N[SurfaceFlinger transaction 1035 + explicit PhysicalDisplayId]
-    N --> O[Lock internal panel to selected max native refresh]
-    O --> G
+    B --> X{"Internal max-refresh fix enabled?"}
+    X -->|Yes| X1["Enumerate real internal SF DisplayModes"]
+    X1 --> X2["Choose the resolution with the largest pixel area"]
+    X2 --> X3["Choose the highest refresh rate at that resolution"]
+    X3 --> X4["SurfaceFlinger 1035: modeId + internal PhysicalDisplayId"]
+    X4 --> X5["Verify internal activeMode"]
+    X -->|No| X6["Skip internal-panel lock"]
 
-    P[External Pacesetter - experimental] --> Q[Promote external display as scheduler pacesetter]
-    Q --> R[Potentially bypass internal refresh ceiling]
-    R --> S[Higher hot-plug / SF instability risk]
+    D --> E{"Target mode source"}
+    E -->|Manual| E1["User-selected resolution + refresh rate"]
+    E -->|Auto Highest| E2["Keep the current actual HWC resolution"]
+    E2 --> E3["Choose the highest refresh rate at that resolution"]
+    E1 --> F["Publish apply request to the Agent"]
+    E3 --> F
+
+    F --> G["Composer3 setActiveConfigWithConstraints"]
+    G --> H["Verify getActiveConfig / HWC attributes"]
+    H -->|Not settled| H1["Up to 3 retries + late reconciliation"]
+    H1 --> H
+    H -->|Success| I["DisplayModeController setActiveMode synchronizes SF"]
+    H -->|Failure| HF["Return HWC switch failure state"]
+    I --> J["Refresh actual HWC state"]
+    J --> K["Verify ActiveMode / renderRate / actual HWC output"]
+    X5 --> K
+    X6 --> K
+    K --> L["WebUI / scheduler monitor"]
+
+    K --> P{"Enable External Pacesetter?"}
+    P -->|No| L
+    P -->|Yes| P1["sync_actual: resync SF from the real HWC mode"]
+    P1 --> P2["Send pace request"]
+    P2 --> P3{"Scheduler call path"}
+    P3 -->|OOS / legacy resolver| P4["Call setPacesetterDisplay directly"]
+    P3 -->|HyperOS / exact-export fallback| P5["Queue call until SF main-thread commit"]
+    P4 --> P6["Verify the real Pacesetter through dumpsys"]
+    P5 --> P6
+    P6 --> P7["May bypass the internal scheduling refresh-rate ceiling"]
+    P7 --> P8["High risk: low internal FPS / hot-plug stalls or near-freeze / SF instability"]
+    P6 --> L
 ```
 
-### Display pipeline
+### Android display pipeline and module intervention points
 
 ```mermaid
 flowchart LR
-    A[DisplayManager] --> B[SurfaceFlinger]
-    B --> C[DisplayModeController]
-    B --> D[Scheduler / Pacesetter]
-    C --> E[Hardware Composer]
-    D --> E
-    E --> F[Composer HAL / Vendor display stack]
-    F --> G[USB-C / DP / HDMI path]
-    G --> H[External monitor]
+    A["DisplayManager / Framework"] --> B["SurfaceFlinger"]
+    B --> C["DisplayModeController"]
+    B --> D["Scheduler / Pacesetter"]
+    B --> E["Composer3 / Hardware Composer client"]
+    C --> E
+    E --> F["Vendor Composer HAL / Display Driver"]
+    F --> G["USB-C / DP / HDMI path"]
+    G --> H["External display"]
+    D --> I["Frame pacing / render cadence"]
+
+    O["OPlusAutoHR Agent"] -.-> C
+    O -.-> D
+    O -.-> E
+    X["HyperOS 1035 internal-panel lock"] -.-> B
 ```
+
+### Implementation notes verified against Canary 1.0
+
+- **The HyperOS internal max-refresh fix is independent from Auto Highest.** After hot-plug, the Supervisor attempts the internal-panel fix first; external Auto Highest runs only when `auto_enabled=1`.
+- **Auto Highest does not combine an unrelated maximum resolution with an unrelated maximum refresh rate.** It keeps the current actual HWC resolution and chooses the highest real refresh rate available at that resolution.
+- **Manual and automatic external mode changes switch HWC first.** The Agent calls `DisplayModeController::setActiveMode()` only after the actual HWC mode matches the target.
+- **HWC verification includes retries and late reconciliation.** The current Agent allows up to 3 Composer attempts and can reclassify a delayed vendor `getActiveConfig` result as success.
+- **The HyperOS 1035 path uses a real internal modeId plus an explicit PhysicalDisplayId.** The current implementation chooses the largest pixel-area resolution first and then the highest refresh rate at that resolution; 144 Hz, modeId and device IDs are not hard-coded.
+- **External Pacesetter runs `sync_actual` first.** The OOS legacy path can call the Scheduler directly; the HyperOS exact-export path queues the call to SurfaceFlinger's main-thread `commit()` path. Hot-unplug restore attempts exist, but the feature remains high-risk experimental.
 
 ---
 
